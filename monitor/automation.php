@@ -1,0 +1,167 @@
+<?php
+/************************************************************************/
+/* AChecker                                                             */
+/************************************************************************/
+/* Copyright (c) 2008 - 2011                                            */
+/* Inclusive Design Institute                                           */
+/*                                                                      */
+/* This program is free software. You can redistribute it and/or        */
+/* modify it under the terms of the GNU General Public License          */
+/* as published by the Free Software Foundation.                        */
+/************************************************************************/
+// $Id$
+
+define('AC_INCLUDE_PATH', '../include/');
+include(AC_INCLUDE_PATH.'vitals.inc.php');
+include_once(AC_INCLUDE_PATH.'classes/Utility.class.php');
+include_once(AC_INCLUDE_PATH.'classes/DAO/MonitorDAO.class.php');
+include_once(AC_INCLUDE_PATH.'classes/DAO/MonitorResultDAO.class.php');
+include_once(AC_INCLUDE_PATH.'classes/DAO/UserLinksDAO.class.php');
+
+$MonitorDAO = new MonitorDAO();
+$userLinksDAO = new UserLinksDAO();
+
+if (defined('STDIN')) {
+	if (isset($argv[1]) && ($argv[1] == 'cleanup'))
+	{
+		echo PHP_EOL;
+		echo "--------------------------------------------------".PHP_EOL;
+		echo "Date: ".date("Y-m-d H:i:s").PHP_EOL;
+		if($MonitorDAO->setCleanupAutoFail())
+		{
+			echo "COMPLETED SUCCESSFULLY".PHP_EOL;
+		} else {
+			echo "CLEANUP FAILED".PHP_EOL;
+			echo $msg->GetAll().PHP_EOL;
+		}
+		echo "--------------------------------------------------".PHP_EOL;
+		exit(2);
+	}
+}
+
+if (!isset($_GET['limit']))
+{
+	$limit = 1;
+} else {
+	$limit = intval($_GET['limit']);
+	if (!$limit) {
+		$limit = 1;
+	}	
+} 
+
+$monitor_rows = $MonitorDAO->getMonitorsAuto($limit);
+
+if (is_array($monitor_rows))
+{
+	include(AC_INCLUDE_PATH. "classes/AccessibilityValidator.class.php");
+	require(AC_INCLUDE_PATH . 'classes/phpmailer/acheckermailer.class.php');
+	
+	foreach ($monitor_rows as $monitor)
+	{
+		$MonitorDAO->setAutoRun($monitor['monitor_id']);
+		
+		echo PHP_EOL;
+		echo "--------------------------------------------------".PHP_EOL;
+		echo "Start: ".date("Y-m-d H:i:s").PHP_EOL;
+		echo "URL: ".$monitor["URL"].PHP_EOL;
+		echo "--------------------------------------------------".PHP_EOL;
+		
+		$has_enough_memory = true;
+		
+		$uri = Utility::getValidURI($addslashes($monitor["URL"]));
+		
+		// Check if the given URI is connectable
+		if ($uri === false)
+		{
+			$msg->addError(array('CANNOT_CONNECT', $monitor["URL"]));
+		}
+		
+		// don't accept localhost URI
+		if (stripos($uri, '://localhost') > 0)
+		{
+			$msg->addError('NOT_LOCALHOST');
+		}
+		
+		$validate_content = @file_get_contents($uri);
+		
+		if (isset($validate_content) && !Utility::hasEnoughMemory(strlen($validate_content)))
+		{
+			$msg->addError('NO_ENOUGH_MEMORY');
+			$has_enough_memory = false;
+		}
+		$guid_id = array($monitor["guideline_id"]);
+	
+	
+		if (isset($validate_content) && $has_enough_memory && !$msg->containsErrors())
+		{
+			$aValidator = new AccessibilityValidator($validate_content, $guid_id, $uri);
+			$aValidator->validate();
+			
+			$num_of_total_a_errors = $aValidator->getNumOfValidateError();
+			$errors = $aValidator->getValidationErrorRpt();
+			
+			$user_link_id = $userLinksDAO->getUserLinkID($monitor['user_id'], $uri, $guid_id);
+			
+			$MonitorResultDAO = new MonitorResultDAO();
+			$MonitorResultDAO->create(AC_AUTO, $monitor['monitor_id'], $guid_id, $user_link_id, $num_of_total_a_errors, $errors);
+			
+			if (!$msg->containsErrors())
+			{
+				$MonitorResultDAO->generateRpt();
+			}
+			
+			if (!$msg->containsErrors())
+			{
+				$msg->addFeedback('ACTION_COMPLETED_SUCCESSFULLY');
+			}
+		}	
+		
+		if (defined('AC_EMAIL_CHECK') && AC_EMAIL_CHECK) 
+		{
+			/* send the email confirmation message: */		
+			$mail = new ACheckerMailer();
+			
+			$mail->CharSet = 'UTF-8';
+			$mail->From     = $_config['contact_email'];
+			$mail->FromName = $_config['contact_name'];
+			$mail->AddAddress($monitor["email"]);
+			$mail->Subject = SITE_NAME . ' - ' . _AC('email_check_subject_auto');
+			if (!$msg->containsErrors())
+			{
+				//$mail->Body    = _AC('email_check_message_auto_success', $monitor["URL"], $MonitorResultDAO->getMonitorID(),$MonitorResultDAO->getResultID(),$msg->GetAll())."<br><br>";				
+				$mail->Body    = _AC('email_check_message_auto_success', $monitor["URL"], $MonitorResultDAO->getMonitorID(),$MonitorResultDAO->getResultID())."<br><br>";
+			} else {
+				$mail->Body    = _AC('email_check_message_auto_unsuccess', $monitor["URL"], $msg->GetAll())."<br><br>";
+			}
+			$mail->IsHTML(true);
+			$mail->Send();
+			$mail = null;
+		}
+		
+		if (!$msg->containsErrors())
+		{
+			$MonitorDAO->setAutoDefault($monitor['monitor_id']);
+		} else {
+			$MonitorDAO->setAutoFail($monitor['monitor_id']);
+		}
+	
+		echo PHP_EOL;
+		echo "--------------------------------------------------".PHP_EOL;
+		echo "End: ".date("Y-m-d H:i:s").PHP_EOL;
+		echo "URL: ".$monitor["URL"].PHP_EOL;
+		echo $msg->GetAll().PHP_EOL;
+		echo "--------------------------------------------------".PHP_EOL;
+		
+		$msg->UnsetAll();
+	}
+}
+
+if ($MonitorDAO->getCountMonitorsAuto() > 0)
+{
+	exit(1);
+} else {
+	exit(0);
+}
+
+
+?>
